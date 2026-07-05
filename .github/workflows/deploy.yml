@@ -1,0 +1,109 @@
+name: Deploy Netlify Redirect Site
+
+on:
+  workflow_dispatch:
+    inputs:
+      site_name:
+        description: "Netlify site name (must be globally unique, e.g. tanveer-demo-1)"
+        required: true
+        type: string
+      default_url:
+        description: "Fallback redirect URL (used when ?ref= is missing/unknown)"
+        required: true
+        default: "https://example.com"
+        type: string
+      partner1_url:
+        description: "Redirect URL for ?ref=partner1"
+        required: false
+        default: "https://example.com/?src=partner1"
+        type: string
+      partner2_url:
+        description: "Redirect URL for ?ref=partner2"
+        required: false
+        default: "https://example.com/?src=partner2"
+        type: string
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install Netlify CLI
+        run: npm install -g netlify-cli
+
+      - name: Generate edge function from inputs
+        run: |
+          mkdir -p edge-functions
+          cat > edge-functions/redirect.js <<EOF
+          export default async (request, context) => {
+            const url = new URL(request.url);
+            const ref = url.searchParams.get("ref") || "default";
+
+            const destinations = {
+              partner1: "${{ inputs.partner1_url }}",
+              partner2: "${{ inputs.partner2_url }}",
+              default: "${{ inputs.default_url }}"
+            };
+
+            const target = destinations[ref] || destinations.default;
+
+            return Response.redirect(target, 302);
+          };
+          EOF
+          cat edge-functions/redirect.js
+
+      - name: Ensure netlify.toml exists
+        run: |
+          cat > netlify.toml <<EOF
+          [build]
+            publish = "public"
+
+          [[edge_functions]]
+            path = "/go"
+            function = "redirect"
+          EOF
+
+      - name: Ensure public/ has an index page
+        run: |
+          mkdir -p public
+          if [ ! -f public/index.html ]; then
+            echo "<h1>Redirect site</h1><p>Try /go?ref=partner1</p>" > public/index.html
+          fi
+
+      - name: Create site (idempotent) and capture Site ID
+        env:
+          NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
+        run: |
+          set -e
+          EXISTING_ID=$(netlify api getSite --data "{\"site_id\":\"${{ inputs.site_name }}\"}" 2>/dev/null | jq -r '.id // empty' || true)
+          if [ -z "$EXISTING_ID" ]; then
+            echo "Creating new site: ${{ inputs.site_name }}"
+            CREATE_OUT=$(netlify sites:create --name "${{ inputs.site_name }}" --json)
+            SITE_ID=$(echo "$CREATE_OUT" | jq -r '.id')
+          else
+            echo "Site already exists: $EXISTING_ID"
+            SITE_ID=$EXISTING_ID
+          fi
+          echo "SITE_ID=$SITE_ID" >> "$GITHUB_ENV"
+
+      - name: Deploy to Netlify (production)
+        env:
+          NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
+        run: |
+          netlify deploy \
+            --site "$SITE_ID" \
+            --dir public \
+            --prod \
+            --message "Deploy via GitHub Actions ($GITHUB_SHA)"
+
+      - name: Print live URL
+        run: |
+          echo "Deployed. Test with:"
+          echo "https://${{ inputs.site_name }}.netlify.app/go?ref=partner1"
