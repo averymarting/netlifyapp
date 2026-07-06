@@ -64,6 +64,7 @@ jobs:
           cat > netlify.toml <<EOF
           [build]
             publish = "public"
+            edge_functions = "edge-functions"
 
           [[edge_functions]]
             path = "/go"
