@@ -51,13 +51,17 @@ URLS_TAB = "Pages Urls"
 
 
 def _oauth_creds_from_parts(client_id, client_secret, refresh_token, token_uri=None):
+    # Deliberately omit `scopes` here. The refresh token already carries
+    # whatever scope it was originally granted (e.g. drive or spreadsheets).
+    # Explicitly requesting a different scope on refresh causes Google to
+    # reject the request with `invalid_scope`.
     creds = OAuthCredentials(
         token=None,
         refresh_token=refresh_token,
         token_uri=token_uri or "https://oauth2.googleapis.com/token",
         client_id=client_id,
         client_secret=client_secret,
-        scopes=SCOPES,
+        scopes=None,
     )
     creds.refresh(AuthRequest())
     return creds
