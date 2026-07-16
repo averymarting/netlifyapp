@@ -10,14 +10,27 @@ Two subcommands, sharing one Google Sheets auth setup:
 
   append-url   Append one [site name, url, timestamp] row to "Pages Urls".
 
-Auth (pick ONE):
-  Service account (recommended):
-    GOOGLE_SERVICE_ACCOUNT_JSON  - full JSON key file contents
+Auth (the script tries these in order, using whichever secret is set):
 
-  OAuth user credentials (three separate secrets, never one combined blob):
-    GOOGLE_OAUTH_CLIENT_ID
-    GOOGLE_OAUTH_CLIENT_SECRET
-    GOOGLE_OAUTH_REFRESH_TOKEN
+  1. GOOGLE_SERVICE_ACCOUNT_JSON
+     A real service-account key file's contents (has "client_email" and
+     "private_key" fields).
+
+  2. GOOGLE_OAUTH_JSON
+     One combined JSON secret shaped like:
+       {
+         "refresh_token": "...",
+         "client_id": "...",
+         "client_secret": "...",
+         "token_uri": "https://oauth2.googleapis.com/token"  (optional)
+       }
+     ("token"/"expiry"/"scopes"/"account"/"universe_domain" fields, if present,
+     are ignored -- only refresh_token/client_id/client_secret/token_uri matter,
+     since the access token itself is re-derived from the refresh token.)
+
+  3. GOOGLE_OAUTH_CLIENT_ID / GOOGLE_OAUTH_CLIENT_SECRET / GOOGLE_OAUTH_REFRESH_TOKEN
+     The same OAuth credential, split across three separate secrets instead of
+     one JSON blob.
 """
 
 import argparse
@@ -29,6 +42,7 @@ import sys
 
 from google.oauth2.service_account import Credentials as ServiceAccountCredentials
 from google.oauth2.credentials import Credentials as OAuthCredentials
+from google.auth.transport.requests import Request as AuthRequest
 from googleapiclient.discovery import build
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
@@ -36,30 +50,56 @@ NAMES_TAB = "Pages Names"
 URLS_TAB = "Pages Urls"
 
 
+def _oauth_creds_from_parts(client_id, client_secret, refresh_token, token_uri=None):
+    creds = OAuthCredentials(
+        token=None,
+        refresh_token=refresh_token,
+        token_uri=token_uri or "https://oauth2.googleapis.com/token",
+        client_id=client_id,
+        client_secret=client_secret,
+        scopes=SCOPES,
+    )
+    creds.refresh(AuthRequest())
+    return creds
+
+
 def get_sheets_service():
     sa_raw = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
+    oauth_json_raw = os.environ.get("GOOGLE_OAUTH_JSON")
     oauth_client_id = os.environ.get("GOOGLE_OAUTH_CLIENT_ID")
     oauth_client_secret = os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET")
     oauth_refresh_token = os.environ.get("GOOGLE_OAUTH_REFRESH_TOKEN")
 
     if sa_raw:
         info = json.loads(sa_raw)
+        if "client_email" not in info or "private_key" not in info:
+            sys.exit(
+                "GOOGLE_SERVICE_ACCOUNT_JSON doesn't look like a service account key "
+                "(missing client_email/private_key). If this is actually an OAuth "
+                "user credential, put it in GOOGLE_OAUTH_JSON instead."
+            )
         creds = ServiceAccountCredentials.from_service_account_info(info, scopes=SCOPES)
-    elif oauth_client_id and oauth_client_secret and oauth_refresh_token:
-        creds = OAuthCredentials(
-            token=None,
-            refresh_token=oauth_refresh_token,
-            token_uri="https://oauth2.googleapis.com/token",
-            client_id=oauth_client_id,
-            client_secret=oauth_client_secret,
-            scopes=SCOPES,
+
+    elif oauth_json_raw:
+        info = json.loads(oauth_json_raw)
+        missing = [k for k in ("client_id", "client_secret", "refresh_token") if not info.get(k)]
+        if missing:
+            sys.exit(f"GOOGLE_OAUTH_JSON is missing required field(s): {', '.join(missing)}")
+        creds = _oauth_creds_from_parts(
+            client_id=info["client_id"],
+            client_secret=info["client_secret"],
+            refresh_token=info["refresh_token"],
+            token_uri=info.get("token_uri"),
         )
-        creds.refresh(__import__("google.auth.transport.requests", fromlist=["Request"]).Request())
+
+    elif oauth_client_id and oauth_client_secret and oauth_refresh_token:
+        creds = _oauth_creds_from_parts(oauth_client_id, oauth_client_secret, oauth_refresh_token)
+
     else:
         sys.exit(
-            "No Google credentials found. Set either GOOGLE_SERVICE_ACCOUNT_JSON, "
-            "or all three of GOOGLE_OAUTH_CLIENT_ID / GOOGLE_OAUTH_CLIENT_SECRET / "
-            "GOOGLE_OAUTH_REFRESH_TOKEN."
+            "No Google credentials found. Set one of: GOOGLE_SERVICE_ACCOUNT_JSON, "
+            "GOOGLE_OAUTH_JSON (combined blob), or the three GOOGLE_OAUTH_CLIENT_ID / "
+            "GOOGLE_OAUTH_CLIENT_SECRET / GOOGLE_OAUTH_REFRESH_TOKEN secrets."
         )
 
     return build("sheets", "v4", credentials=creds, cache_discovery=False)
